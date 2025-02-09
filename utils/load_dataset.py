@@ -64,7 +64,4 @@ class LoadDataset(Dataset):
         }
 
         return image, target
-
-
-
-        
+    
