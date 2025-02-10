@@ -90,15 +90,24 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=5, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=2, help='Batch size')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
+    parser.add_argument('--sets_ratio', type=float, default=None, help='Ratio of the datasets (0.0 - 1.0] or an integer for number of images')
     args = parser.parse_args()
 
     # Device to be used for training
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {DEVICE}")
 
-    # Load validation dataset and initialize DataLoader
-    valid_dataset = LoadDataset(VALID_DIR, COCO_VALID_PATH)
+    # Load train dataset and initialize DataLoader
+    train_dataset = LoadDataset(TRAIN_DIR, COCO_TRAIN_PATH, set_ratio=args.sets_ratio)
+    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_fn)
+
+    # Load valid dataset and initialize DataLoader
+    valid_dataset = LoadDataset(VALID_DIR, COCO_VALID_PATH, set_ratio=args.sets_ratio)
     valid_dataloader = DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_fn)
+
+    # Load test dataset and initialize DataLoader
+    test_dataset = LoadDataset(TEST_DIR, COCO_TEST_PATH, set_ratio=args.sets_ratio)
+    test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_fn)
 
     # Load pre-trained Deformable DETR model and image processor
     processor = AutoImageProcessor.from_pretrained("SenseTime/deformable-detr")
@@ -131,9 +140,8 @@ if __name__ == '__main__':
     model.train()
     for epoch in range(args.epochs):
         running_train_loss = 0.0  # Accumulate training loss for the epoch
-
         # Iterate over the train DataLoader
-        for iteration, (images, targets) in enumerate(tqdm(valid_dataloader, desc=f'Epoch {epoch+1}/{args.epochs}'), start=1):
+        for iteration, (images, targets) in enumerate(tqdm(train_dataloader, desc=f'Epoch {epoch+1}/{args.epochs}'), start=1):
             torch.cuda.empty_cache()  # Clear cached memory on GPU to avoid out-of-memory issues
 
             # Preprocesses images using processor and move to the specified device
