@@ -20,6 +20,7 @@ class LoadDataset(Dataset):
         transform (Optional[A.Compose]): Optional image transformations using Albumentations. Defaults to None
         set_ratio (Optional[Union[int, float]]): Ratio for splitting the dataset. Can be a float (percentage of the dataset). Defaults to 1.0 -> 100%.
     '''
+
     root_dir: Path
     coco_json_file: Path
     transform: Optional[A.Compose] = None
@@ -36,6 +37,9 @@ class LoadDataset(Dataset):
         '''
         # Load file names of images
         self.image_file_names = np.array(os.listdir(self.root_dir))
+        # Shuffle the list of file names
+        np.random.seed(42)
+        np.random.shuffle(self.image_file_names)
 
         # Check the assumptions
         if self.set_ratio is not None:
@@ -121,9 +125,9 @@ class LoadDataset(Dataset):
                 # Deformable DETR reqiures coordinates in (x_min, y_min, x_max, y_max) format
                 x_min = annotation['bbox'][0]
                 y_min = annotation['bbox'][1]
-                x_max = x_min + annotation['bbox'][2]
-                y_max = y_min + annotation['bbox'][3]
-                bboxes.append([x_min, y_min, x_max, y_max])
+                width = annotation['bbox'][2]
+                height = annotation['bbox'][3]
+                bboxes.append([x_min, y_min, width, height])
                 labels.append(annotation['category_id'])
 
         # Normalize bounding boxes to the range [0 - 1]
