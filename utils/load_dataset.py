@@ -51,7 +51,7 @@ class LoadDataset(Dataset):
             
             # If type of the set_ratio is not int or float then raise TypeError
             else:
-                raise TypeError('set_ratio must be either an float.')
+                raise TypeError('set_ratio must be an float.')
             
             # Select the specified number of images.
             self.image_file_names = self.image_file_names[:num_images]

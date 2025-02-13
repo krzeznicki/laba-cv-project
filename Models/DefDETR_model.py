@@ -1,8 +1,9 @@
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
-from torch.optim import Adam, Optimizer
-from dataclasses import dataclass, field
+from torch.optim import AdamW, Optimizer
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from dataclasses import dataclass
 from typing import Optional, List, Tuple
 from transformers import AutoImageProcessor, DeformableDetrForObjectDetection
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
@@ -11,15 +12,47 @@ import numpy as np
 from tqdm import tqdm
 from datetime import datetime
 from pathlib import Path
+from collections import deque
+import os
+
+
+@dataclass
+class CheckpointManager:
+    max_checkpoints: int
+
+    def __post_init__(self):
+        self.checkpoint_paths = deque(maxlen=self.max_checkpoints)
+
+    def save_checkpoint(self, checkpoint, checkpoint_path):
+        if len(self.checkpoint_paths) == self.max_checkpoints:
+            self.delete_last_checkpoint()
+
+        torch.save(checkpoint, checkpoint_path)
+        self.add_new_checkpoint(checkpoint_path)
+        print(f'Checkpoint saved: {checkpoint_path}')
+
+    def delete_last_checkpoint(self):
+        oldest_checkpoint = self.checkpoint_paths.popleft()
+        os.remove(oldest_checkpoint)
+
+    def add_new_checkpoint(self, checkpoint_path: Path):
+        self.checkpoint_paths.append(checkpoint_path)
+
 
 @dataclass
 class DeformableDETRConfig:
     pretrained_model: str = "SenseTime/deformable-detr"
-    optimizer: Optimizer = Adam
-    learning_rate: float = 0.0001
     num_epochs: int = 5
     batch_size: int = 2
+    optimizer: Optimizer = AdamW
+    learning_rate: float = 0.0001
     checkpoints_dir: Optional[Path] = None
+    max_checkpoints: int = 10
+    val_frequency: int = 10
+    use_scheduler: bool = False  # If True the use CosineAnnealingLR (the method for learning rate scheduler)
+    T_max: int = 5  # Number of epochs to reach minimum learning rate
+    eta_min: float = 1e-6  # Minimum learning rate after T_max epochs
+
 
 class DeformableDETR(nn.Module):
     def __init__(self, config: DeformableDETRConfig):
@@ -30,11 +63,22 @@ class DeformableDETR(nn.Module):
         self.processor = AutoImageProcessor.from_pretrained(self.config.pretrained_model, use_fast=True)
         self.model = DeformableDetrForObjectDetection.from_pretrained(self.config.pretrained_model)
         self.model.to(self.device)
+
         self.optimizer = self.config.optimizer(self.model.parameters(), lr=self.config.learning_rate)
+        if self.config.use_scheduler:
+            self.scheduler = CosineAnnealingLR(
+                optimizer=self.optimizer,
+                T_max=self.config.T_max,
+                eta_min=self.config.eta_min
+            )
+
+        if self.config.checkpoints_dir is not None:
+            self.checkpoint_manager = CheckpointManager(self.config.max_checkpoints)
+        
+        self.map_metric = MeanAveragePrecision(iou_thresholds=[0.3, 0.5, 0.75])
         self.train_loss = []
         self.valid_loss = []
 
-        self.map_metric = MeanAveragePrecision(iou_thresholds=[0.3, 0.5, 0.75])
 
     def forward(self, images: List[np.ndarray], targets: Optional[list[dict]]) -> dict:
         inputs = self.processor(images=images, return_tensors='pt')
@@ -47,6 +91,7 @@ class DeformableDETR(nn.Module):
             outputs = self.model(pixel_values=inputs)
 
         return outputs
+
 
     def train_model(self, train_dataloader: DataLoader, valid_dataloader: DataLoader):       
         # Initialize Weights & Biases (wandb) for logging
@@ -65,8 +110,23 @@ class DeformableDETR(nn.Module):
 
         # Training loop over the specified number epochs
         for epoch in range(self.config.num_epochs):
+
+            if self.config.use_scheduler:
+                current_lr = self.scheduler.get_last_lr()[0]
+                print(f'Epoch: {epoch + 1}: Current learning rate: {current_lr}')
+                wandb.log(
+                    {
+                        'learning_rate': current_lr
+                    }
+                )
+
             # Pass through one epoch
             train_loss_per_epoch = self._train_one_epoch(train_dataloader, valid_dataloader, epoch)
+            wandb.log(
+                {
+                    'train/train_loss': train_loss_per_epoch
+                }
+            )
 
             # Evaluate model after each epoch
             print(f'Epoch: {epoch + 1}. Evaluating model on valid dataset.')
@@ -81,15 +141,17 @@ class DeformableDETR(nn.Module):
             # If the path to save checkpoint is defined then save it after each epoch
             if self.config.checkpoints_dir is not None:
                 checkpoint_file_name = f'model_epoch{epoch + 1}'
-                self.save(checkpoint_name=checkpoint_file_name)
+                self._save_model(checkpoint_name=checkpoint_file_name)
+
+            if self.config.use_scheduler:
+                self.scheduler.step()
 
         wandb.finish()
         
         # If the path to save checkpoint is defined then save final model
         if self.config.checkpoints_dir is not None:
             checkpoint_file_name = f'final_player_detection_model'
-            self.save(checkpoint_name=checkpoint_file_name)
-
+            self._save_model(checkpoint_name=checkpoint_file_name)
 
 
     def _train_one_epoch(self, train_dataloader: DataLoader, valid_dataloader, epoch: int) -> float:
@@ -109,16 +171,15 @@ class DeformableDETR(nn.Module):
             self.optimizer.step()
             # Accumulate training loss for this epoch
             running_train_loss += loss.item()
-            print(loss.item())
             wandb.log(
                 {
                     'iteration': iteration + 1,
-                    'train/train_loss': loss.item()
+                    'train/train_loss_per_iteration': loss.item()
                 }
             )
 
             # After each 10 iterations calculate validation and train loss 
-            if (iteration + 1) % 2 == 0:
+            if (iteration + 1) % self.config.val_frequency == 0:
                 train_loss_n_iteration = running_train_loss / (iteration + 1)
 
                 print(f'Iteration: {iteration + 1}. Evaluating model on valid dataset.')
@@ -129,9 +190,10 @@ class DeformableDETR(nn.Module):
                 # If the path to save checkpoint is defined then save it after n _iteration
                 if self.config.checkpoints_dir is not None:
                     checkpoint_file_name = f'model_epoch{epoch + 1}_iteration{iteration + 1}'
-                    self.save(checkpoint_name=checkpoint_file_name)
+                    self._save_model(checkpoint_name=checkpoint_file_name)
         
-        return running_train_loss / len(train_dataloader)
+        return running_train_loss  / len(train_dataloader)
+
 
     def evaluate(self, dataloader: DataLoader, on_dataset: str) -> dict:
         total_loss = 0.0
@@ -155,6 +217,7 @@ class DeformableDETR(nn.Module):
             'map_75': map_results['map_75'].item(),
         }
 
+
     def _log_metrics(self, train_loss, eval_results, iteration=None, epoch=None):
         # If the function was used to evaluate n iteration
         if iteration is not None and epoch is None:
@@ -162,11 +225,11 @@ class DeformableDETR(nn.Module):
             wandb.log(
                     {
                         'iteration': iteration + 1,
-                        'train/train_loss_per_n_iteration': avg_running_train_loss_n_iteration,
-                        'valid/valid_loss_per_n_iteration': eval_results['avg_loss'],
-                        'mAP/mAP@30_per_n_iteration': eval_results['map_30'],
-                        'mAP/mAP@50_per_n_iteration': eval_results['map_50'],
-                        'mAP/mAP@75_per_n_iteration': eval_results['map_75']
+                        f'train/train_loss_per_{self.config.val_frequency}_iteration': avg_running_train_loss_n_iteration,
+                        f'valid/valid_loss_per_{self.config.val_frequency}_iteration': eval_results['avg_loss'],
+                        f'mAP/mAP@30_per_{self.config.val_frequency}_iteration': eval_results['map_30'],
+                        f'mAP/mAP@50_per_{self.config.val_frequency}_iteration': eval_results['map_50'],
+                        f'mAP/mAP@75_per_{self.config.val_frequency}_iteration': eval_results['map_75']
                     }
             )
         
@@ -186,17 +249,22 @@ class DeformableDETR(nn.Module):
                 }
             )
 
-    def save(self, checkpoint_name: str, extension: str='.pth') -> None:
+
+    def _save_model(self, checkpoint_name: str, extension: str='.pth') -> None:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         checkpoint_path = self.config.checkpoints_dir / f'{checkpoint_name}_{timestamp}{extension}'
-        torch.save(
-            {
-                'model_state_dict': self.model.state_dict()
-            }, 
-        checkpoint_path
-        )
 
-        print(f'Checkpoint saved: {checkpoint_path}')
+        checkpoint = {
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'config': self.config
+        }
+        if self.config.use_scheduler:
+            checkpoint['scheduler_state_dict'] = self.scheduler.state_dict()
+            checkpoint['current_lr'] = self.scheduler.get_last_lr()[0]
+
+        self.checkpoint_manager.save_checkpoint(checkpoint, checkpoint_path)
+
 
     def _process_predictions(self, outputs, images, targets) -> Tuple[dict, dict]:
         image_height, image_width = images[0].shape[-2:]
@@ -236,6 +304,7 @@ class DeformableDETR(nn.Module):
 
         return processed_preds, processed_targets
     
+
     @staticmethod
     def convert_to_xyxy(boxes) -> np.ndarray:
         boxes[:, 2] = boxes[:, 0] + boxes[:, 2]

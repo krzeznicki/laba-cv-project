@@ -2,17 +2,10 @@ import sys
 from pathlib import Path
 import importlib
 import numpy as np
-import torch
 from torch.utils.data import DataLoader
-from transformers import AutoImageProcessor, DeformableDetrForObjectDetection
-from torch.optim import Adam, Optimizer
+from torch.optim import AdamW
 import argparse
-import wandb
-from tqdm import tqdm
-from datetime import datetime
 from typing import Tuple, List, Optional
-from torchmetrics.detection.mean_ap import MeanAveragePrecision
-import supervision as sv
 from DefDETR_model import DeformableDETRConfig, DeformableDETR
 
 # --------------------------------------DEFINE PATHS--------------------------------------
@@ -96,22 +89,32 @@ def dataset_loaders(set_ratio: Optional[float], batch_size: int) -> Tuple[DataLo
 if __name__ == '__main__':
     # Parse command line arguments for epochs, batc size and learning rate
     parser = argparse.ArgumentParser()
-    parser.add_argument('--num_epochs', type=int, default=5, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=2, help='Batch size')
-    parser.add_argument('--lr', type=float, default=0.0001, help='Learning rate')
-    parser.add_argument('--set_ratio', type=float, default=None, help='Ratio of the datasets (0.0 - 1.0] or an integer for number of images')
+    parser.add_argument('--num_epochs', type=int, default=5, help='Number of training epochs.')
+    parser.add_argument('--batch_size', type=int, default=2, help='Batch size.')
+    parser.add_argument('--set_ratio', type=float, default=None, help='Ratio of the datasets (0.0 - 1.0] or an integer for number of images.')
+    parser.add_argument('--lr', type=float, default=0.0001, help='Learning rate.')
+    parser.add_argument('--val_frequency', type=float, default=10, help='Frequency of model validation.')
     parser.add_argument('--checkpoints', type=bool, default=False, help='If True then the model saves checkpoints.')
+    parser.add_argument('--max_checkpoints', type=int, default=10, help='Maximum number of checkpoints contained in a folder.')
+    parser.add_argument('--use_scheduler', type=bool, default=False, help='If True the use learning rate scheduler (CosineAnnealingLR).')
+    parser.add_argument('--T_max', type=int, default=5, help='Number of epochs to reach minimum learning rate -> if use_scheduler=True.')
+    parser.add_argument('--eta_min', type=float, default=1e-6, help='Minimum learning rate after T_max epochs -> if use_scheduler=True.')
     args = parser.parse_args()
 
     train_dataloader, valid_datalaoder, test_dataloader = dataset_loaders(args.set_ratio, args.batch_size)
 
     config = DeformableDETRConfig(
         pretrained_model = "SenseTime/deformable-detr",
-        optimizer = Adam,
-        learning_rate = args.lr,
         num_epochs = args.num_epochs,
         batch_size = args.batch_size,
-        checkpoints_dir = CHECKPOINTS_DIR if args.checkpoints else None
+        optimizer = AdamW,
+        learning_rate = args.lr,
+        checkpoints_dir = CHECKPOINTS_DIR if args.checkpoints else None,
+        max_checkpoints = args.max_checkpoints,
+        val_frequency = args.val_frequency,
+        use_scheduler=args.use_scheduler,
+        T_max=args.T_max,
+        eta_min=args.eta_min
     )
 
     model = DeformableDETR(config)
