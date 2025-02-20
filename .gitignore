@@ -1,3 +1,4 @@
+HEAD
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -170,3 +171,8 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 .DS_Store
+
+football_env/ 
+.env 
+data/ 
+Mikolaj
