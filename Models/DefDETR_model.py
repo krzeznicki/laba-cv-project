@@ -14,16 +14,37 @@ from datetime import datetime
 from pathlib import Path
 from collections import deque
 import os
+import cv2
 
 
 @dataclass
 class CheckpointManager:
+    '''
+    A class to manage model checkpoints with a maximum limit.
+
+    This class handles saving, deleting and managing model checkpoints in a FIFO (First In First Out) manner.
+    When the maximum number of checkpoints is reached, the oldest checkpoint is automatically deleted
+    before saving a new one.
+
+    Attributes:
+        max_checkpoints (int): Maximum number of checkpoint files to maintain.
+        checkpoint_paths (collections.deque): A double-ended queue storing paths of saved checkpoints.
+    '''
+    
     max_checkpoints: int
 
     def __post_init__(self):
         self.checkpoint_paths = deque(maxlen=self.max_checkpoints)
 
     def save_checkpoint(self, checkpoint, checkpoint_path):
+        '''
+        Saves a new checkpoint and manages the total number of checkpoints.
+
+        Args:
+            checkpoint: The model checkpoint to save
+            checkpoint_path: Path where the checkpoint will be saved
+        '''
+
         if len(self.checkpoint_paths) == self.max_checkpoints:
             self.delete_last_checkpoint()
 
@@ -32,15 +53,43 @@ class CheckpointManager:
         print(f'Checkpoint saved: {checkpoint_path}')
 
     def delete_last_checkpoint(self):
+        '''
+        Deletes the oldest checkpoint from the filesystem and removes it from tracking.
+        '''
+
         oldest_checkpoint = self.checkpoint_paths.popleft()
         os.remove(oldest_checkpoint)
 
     def add_new_checkpoint(self, checkpoint_path: Path):
+        '''
+        Adds a new checkpoint path to the tracking queue.
+
+        Args:
+            checkpoint_path (Path): Path to the newly saved checkpoint
+        '''
+
         self.checkpoint_paths.append(checkpoint_path)
 
 
 @dataclass
 class DeformableDETRConfig:
+    '''
+    Configuration class for the Deformable DETR model.
+
+    Attributes:
+        pretrained_model (str): Name of the pretrained model to use. Defaults to "SenseTime/deformable-detr".
+        num_epochs (int): Number of training epochs. Defaults to 5.
+        batch_size (int): Batch size for training. Defaults to 2.
+        optimizer (Optimizer): Optimizer class to use for training. Defaults to AdamW.
+        learning_rate (float): Learning rate for training. Defaults to 0.0001.
+        checkpoints_dir (Optional[Path]): Directory to save model checkpoints. Defaults to None.
+        max_checkpoints (int): Maximum number of checkpoints to keep. Defaults to 10.
+        val_frequency (int): Frequency of validation in epochs. Defaults to 10.
+        use_scheduler (bool): Whether to use CosineAnnealingLR scheduler. Defaults to False.
+        T_max (int): Number of epochs to reach minimum learning rate in scheduler, usually the same number as the epoch. Defaults to 5.
+        eta_min (float): Minimum learning rate after T_max epochs in scheduler. Defaults to 1e-6.
+    '''
+
     pretrained_model: str = "SenseTime/deformable-detr"
     num_epochs: int = 5
     batch_size: int = 2
@@ -49,9 +98,9 @@ class DeformableDETRConfig:
     checkpoints_dir: Optional[Path] = None
     max_checkpoints: int = 10
     val_frequency: int = 10
-    use_scheduler: bool = False  # If True the use CosineAnnealingLR (the method for learning rate scheduler)
-    T_max: int = 5  # Number of epochs to reach minimum learning rate
-    eta_min: float = 1e-6  # Minimum learning rate after T_max epochs
+    use_scheduler: bool = False
+    T_max: int = 5
+    eta_min: float = 1e-6
 
 
 class DeformableDETR(nn.Module):
@@ -97,7 +146,7 @@ class DeformableDETR(nn.Module):
         # Initialize Weights & Biases (wandb) for logging
         wandb.init(
             project='player_detection_model',
-            name='player_detections_logs',
+            name='test_on_full_dataset_lr_schedule_new_dataset',
             config={
                 'learning_rate': self.config.learning_rate,
                 'epochs': self.config.num_epochs,
@@ -154,7 +203,7 @@ class DeformableDETR(nn.Module):
             self._save_model(checkpoint_name=checkpoint_file_name)
 
 
-    def _train_one_epoch(self, train_dataloader: DataLoader, valid_dataloader, epoch: int) -> float:
+    def _train_one_epoch(self, train_dataloader: DataLoader, valid_dataloader: DataLoader, epoch: int) -> float:
         self.model.train()
         running_train_loss = 0.0
 
@@ -178,7 +227,7 @@ class DeformableDETR(nn.Module):
                 }
             )
 
-            # After each 10 iterations calculate validation and train loss 
+            # After each val_frequency iterations calculate validation and train loss 
             if (iteration + 1) % self.config.val_frequency == 0:
                 train_loss_n_iteration = running_train_loss / (iteration + 1)
 
@@ -187,12 +236,14 @@ class DeformableDETR(nn.Module):
                 eval_results = self.evaluate(valid_dataloader, on_dataset='valid')
                 self._log_metrics(train_loss_n_iteration, eval_results, iteration=iteration)
 
-                # If the path to save checkpoint is defined then save it after n _iteration
+                # If the path to save checkpoint is defined then save it after n iterations
                 if self.config.checkpoints_dir is not None:
                     checkpoint_file_name = f'model_epoch{epoch + 1}_iteration{iteration + 1}'
                     self._save_model(checkpoint_name=checkpoint_file_name)
+                
+                self.model.train()  # Set model back to training mode
         
-        return running_train_loss  / len(train_dataloader)
+        return running_train_loss / len(train_dataloader)
 
 
     def evaluate(self, dataloader: DataLoader, on_dataset: str) -> dict:
@@ -218,14 +269,13 @@ class DeformableDETR(nn.Module):
         }
 
 
-    def _log_metrics(self, train_loss, eval_results, iteration=None, epoch=None):
+    def _log_metrics(self, train_loss: float, eval_results: dict, iteration: Optional[int] = None, epoch: Optional[int] = None):
         # If the function was used to evaluate n iteration
         if iteration is not None and epoch is None:
-            avg_running_train_loss_n_iteration = train_loss
             wandb.log(
                     {
                         'iteration': iteration + 1,
-                        f'train/train_loss_per_{self.config.val_frequency}_iteration': avg_running_train_loss_n_iteration,
+                        f'train/train_loss_per_{self.config.val_frequency}_iteration': train_loss,
                         f'valid/valid_loss_per_{self.config.val_frequency}_iteration': eval_results['avg_loss'],
                         f'mAP/mAP@30_per_{self.config.val_frequency}_iteration': eval_results['map_30'],
                         f'mAP/mAP@50_per_{self.config.val_frequency}_iteration': eval_results['map_50'],
@@ -235,22 +285,19 @@ class DeformableDETR(nn.Module):
         
         # If the functions was used to evaluate the epoch
         elif epoch is not None and iteration is None:
-            # Train loss 
-            avg_train_loss_per_epoch = train_loss
-            # Tracking losses
             wandb.log(
                 {
                     'epoch': epoch + 1,
-                    'train/train_loss_per_epoch': avg_train_loss_per_epoch,
+                    'train/train_loss_per_epoch': train_loss,
                     'valid/valid_loss_per_epoch': eval_results['avg_loss'],
-                    'mAP/mAP@50_per_epoch': eval_results['map_30'],
+                    'mAP/mAP@30_per_epoch': eval_results['map_30'],
                     'mAP/mAP@50_per_epoch': eval_results['map_50'],
                     'mAP/mAP@75_per_epoch': eval_results['map_75']
                 }
             )
 
 
-    def _save_model(self, checkpoint_name: str, extension: str='.pth') -> None:
+    def _save_model(self, checkpoint_name: str, extension: str = '.pth') -> None:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         checkpoint_path = self.config.checkpoints_dir / f'{checkpoint_name}_{timestamp}{extension}'
 
@@ -266,14 +313,15 @@ class DeformableDETR(nn.Module):
         self.checkpoint_manager.save_checkpoint(checkpoint, checkpoint_path)
 
 
-    def _process_predictions(self, outputs, images, targets) -> Tuple[dict, dict]:
-        image_height, image_width = images[0].shape[-2:]
+    def _process_predictions(self, outputs, images: List[np.ndarray], targets: List[dict]) -> Tuple[List[dict], List[dict]]:
+        # List contains (height, width) of the images in the one batch
+        images_size = [(image.shape[0], image.shape[1]) for image in images]
 
         processed_preds = []
         for i in range(len(outputs.logits)):
-            pred_boxes = self.convert_to_xyxy(outputs.pred_boxes[i].detach().cpu().numpy())
-            pred_boxes[:, [0, 2]] *= image_width  # Scale x_min, x_max to pixels
-            pred_boxes[:, [1, 3]] *= image_height  # Scale y_min,  y_max to pixels
+            pred_boxes = self._convert_to_xyxy(outputs.pred_boxes[i].detach().cpu().numpy())
+            pred_boxes[:, [0, 2]] *= images_size[i][1]  # Scale x_min, x_max to pixels
+            pred_boxes[:, [1, 3]] *= images_size[i][0]  # Scale y_min, y_max to pixels
 
             scores, labels = outputs.logits[i].softmax(-1).detach().cpu().max(dim=-1)
             high_conf_indices = scores > 0.5
@@ -291,10 +339,10 @@ class DeformableDETR(nn.Module):
             )
 
         processed_targets = []
-        for t in targets:
-            gt_boxes = self.convert_to_xyxy(t['boxes'].cpu().numpy())
-            gt_boxes[:, [0, 2]] *= image_width
-            gt_boxes[:, [1, 3]] *= image_height
+        for i, t in enumerate(targets):
+            gt_boxes = self._convert_to_xyxy(t['boxes'].cpu().numpy())
+            gt_boxes[:, [0, 2]] *= images_size[i][1]
+            gt_boxes[:, [1, 3]] *= images_size[i][0]
             processed_targets.append(
                 {
                     'boxes': torch.tensor(gt_boxes),
@@ -306,8 +354,9 @@ class DeformableDETR(nn.Module):
     
 
     @staticmethod
-    def convert_to_xyxy(boxes) -> np.ndarray:
-        boxes[:, 2] = boxes[:, 0] + boxes[:, 2]
-        boxes[:, 3] = boxes[:, 1] + boxes[:, 3]
-
+    def _convert_to_xyxy(boxes: np.ndarray) -> np.ndarray:
+        """Convert boxes from (x, y, w, h) to (x1, y1, x2, y2) format"""
+        boxes = boxes.copy()  # Create a copy to avoid modifying the original array
+        boxes[:, 2] = boxes[:, 0] + boxes[:, 2]  # x2 = x1 + w
+        boxes[:, 3] = boxes[:, 1] + boxes[:, 3]  # y2 = y1 + h
         return boxes

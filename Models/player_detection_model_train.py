@@ -72,11 +72,11 @@ def dataset_loaders(set_ratio: Optional[float], batch_size: int) -> Tuple[DataLo
 
     # Load train dataset and initialize DataLoader
     train_dataset = LoadDataset(TRAIN_DIR, COCO_TRAIN_PATH, set_ratio=set_ratio)
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
 
     # Load valid dataset and initialize DataLoader
     valid_dataset = LoadDataset(VALID_DIR, COCO_VALID_PATH, set_ratio=set_ratio)
-    valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+    valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
 
     # Load test dataset and initialize DataLoader
     test_dataset = LoadDataset(TEST_DIR, COCO_TEST_PATH, set_ratio=set_ratio)
@@ -87,13 +87,27 @@ def dataset_loaders(set_ratio: Optional[float], batch_size: int) -> Tuple[DataLo
 
 
 if __name__ == '__main__':
-    # Parse command line arguments for epochs, batc size and learning rate
+    # Parse command line arguments
+    # Config arguments:
+        # --num_epochs
+        # --batch_size
+        # --lr
+        # --val_frequency
+        # --checkpoints
+        # --max_checkpoints
+        # --use_scheduler
+        # --T_max
+        # --eta_min
+        
+    # dataset loaders arguments:
+        # --set_ratio
+        # --batch_size
     parser = argparse.ArgumentParser()
-    parser.add_argument('--num_epochs', type=int, default=5, help='Number of training epochs.')
+    parser.add_argument('--num_epochs', type=int, default=10, help='Number of training epochs.')
     parser.add_argument('--batch_size', type=int, default=2, help='Batch size.')
     parser.add_argument('--set_ratio', type=float, default=None, help='Ratio of the datasets (0.0 - 1.0] or an integer for number of images.')
     parser.add_argument('--lr', type=float, default=0.0001, help='Learning rate.')
-    parser.add_argument('--val_frequency', type=float, default=10, help='Frequency of model validation.')
+    parser.add_argument('--val_frequency', type=float, default=50, help='Frequency of model validation.')
     parser.add_argument('--checkpoints', type=bool, default=False, help='If True then the model saves checkpoints.')
     parser.add_argument('--max_checkpoints', type=int, default=10, help='Maximum number of checkpoints contained in a folder.')
     parser.add_argument('--use_scheduler', type=bool, default=False, help='If True the use learning rate scheduler (CosineAnnealingLR).')
@@ -111,7 +125,7 @@ if __name__ == '__main__':
         learning_rate = args.lr,
         checkpoints_dir = CHECKPOINTS_DIR if args.checkpoints else None,
         max_checkpoints = args.max_checkpoints,
-        val_frequency = args.val_frequency,
+        val_frequency = int(args.val_frequency),
         use_scheduler=args.use_scheduler,
         T_max=args.T_max,
         eta_min=args.eta_min
